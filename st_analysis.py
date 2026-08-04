@@ -14,7 +14,10 @@ import scipy.optimize as opt
 from scipy import stats as sp_stats
 import re
 from itertools import combinations, product as iterproduct
+from patsy import dmatrix
 import io
+
+MIN_RESID_DF = 3  # 殘差自由度下限：低於此值時 t 檢定與殘差圖失去判讀意義
 
 
 @st.cache_data
@@ -34,6 +37,42 @@ def pval_belongs_to(pval_name, term):
     return (pval_name == term
             or pval_name.startswith(term + "]")
             or pval_name.startswith(term + "["))
+
+
+def count_design_cols(terms, data):
+    """回傳 formula 展開後設計矩陣的欄數（含截距）
+    直接用 patsy 展開，才能正確計入 C() 類別因子被拆成的多個 level 欄位
+    """
+    return dmatrix(" + ".join(terms), data=data, return_type="dataframe").shape[1]
+
+
+def term_strength(term, y_col, data_json):
+    """單項迴歸的調整後 R²，作為裁減時的刪除順序依據（越小越先刪）"""
+    try:
+        return fit_ols(f"{y_col} ~ {term}", data_json).rsquared_adj
+    except Exception:
+        # 無法單獨配適的項（如共線性）視為最弱，優先刪除
+        return float("-inf")
+
+
+def trim_terms_to_budget(terms, y_col, data, data_json, min_resid_df=MIN_RESID_DF):
+    """依殘差自由度預算裁減模型項，回傳 (保留的項, 被刪除的項)
+
+    小樣本 DoE 全展開二階交互作用極易飽和（df_resid <= 0），此時 p-value 全為 NaN，
+    後向消去法會因 NaN 比較恆為 False 而誤判成「篩選完成」，故必須在建模前先卡預算。
+    刪除順序：先砍交互作用中解釋力最弱者，主效應留到最後才動。
+    """
+    kept = list(terms)
+    dropped = []
+    n_samples = len(data)
+
+    while kept and n_samples - count_design_cols(kept, data) < min_resid_df:
+        candidates = [t for t in kept if ":" in t] or kept
+        weakest = min(candidates, key=lambda t: term_strength(t, y_col, data_json))
+        kept.remove(weakest)
+        dropped.append(weakest)
+
+    return kept, dropped
 
 
 def center_point_curvature_test(y_factor, y_center):
@@ -155,6 +194,26 @@ if uploaded_file is not None:
 
         model = None
         df_json = df.to_json()  # 序列化一次，供迴圈內快取使用
+
+        # ---- 自由度預算閘門 ----
+        # 主效應本身就超編時無法建模，直接擋下；否則沿用者會拿到 R²=1 的飽和假模型
+        if len(df) - count_design_cols(main_effects, df) < MIN_RESID_DF:
+            st.error(
+                f"⚠️ 樣本數不足：目前 **{len(df)}** 筆資料，光是 {len(x_cols)} 個主效應就需要 "
+                f"**{count_design_cols(main_effects, df) + MIN_RESID_DF}** 筆才能保留 {MIN_RESID_DF} 個殘差自由度。\n\n"
+                "請減少因子數量，或補充實驗數據後再試。"
+            )
+            st.stop()
+
+        current_terms, dropped_terms = trim_terms_to_budget(current_terms, y_col, df, df_json)
+        if dropped_terms:
+            st.warning(
+                f"⚠️ 自由度不足，已於建模前移除 **{len(dropped_terms)}** 個解釋力最弱的交互作用："
+                f"`{'`, `'.join(dropped_terms)}`\n\n"
+                f"（{len(df)} 筆樣本至多容納 {len(df) - MIN_RESID_DF} 個模型參數，"
+                f"以保留 {MIN_RESID_DF} 個殘差自由度供檢定使用）"
+            )
+
         with st.expander("🔄 展開查看模型自動優化過程", expanded=False):
             step = 1
             while True:
@@ -165,6 +224,16 @@ if uploaded_file is not None:
                 formula = f"{y_col} ~ " + " + ".join(current_terms)
                 model = fit_ols(formula, df_json)
                 pvalues = model.pvalues.drop('Intercept', errors='ignore')
+
+                # 防呆：秩虧損時 p-value 為 NaN，而 NaN 的比較恆為 False，
+                # 會讓下方判斷直接掉進 else 宣告「篩選完成」，故在此攔截並強制裁減
+                if model.df_resid < MIN_RESID_DF or pvalues.isna().any():
+                    candidates = [t for t in current_terms if ":" in t] or current_terms
+                    weakest = min(candidates, key=lambda t: term_strength(t, y_col, df_json))
+                    st.write(f"🔸 步驟 {step}: 模型秩虧損（無有效 P-value），強制移除 `{weakest}`")
+                    current_terms.remove(weakest)
+                    step += 1
+                    continue
 
                 # 以「整個 term」為單位彙總最大 p-value（處理類別因子多 level 的情況）
                 term_max_p = {}
