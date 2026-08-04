@@ -17,7 +17,9 @@ from itertools import combinations, product as iterproduct
 from patsy import dmatrix
 import io
 
-MIN_RESID_DF = 3  # 殘差自由度下限：低於此值時 t 檢定與殘差圖失去判讀意義
+MIN_RESID_DF = 3           # 殘差自由度下限：低於此值時 t 檢定與殘差圖失去判讀意義
+P_VALUE_THRESHOLD = 0.05   # 保留因子的顯著水準門檻
+DEFAULT_SAMPLES_PER_TERM = 10  # EPV 原則：每個模型參數預設需要 10 筆樣本支撐
 
 
 @st.cache_data
@@ -55,8 +57,20 @@ def term_strength(term, y_col, data_json):
         return float("-inf")
 
 
-def trim_terms_to_budget(terms, y_col, data, data_json, min_resid_df=MIN_RESID_DF):
-    """依殘差自由度預算裁減模型項，回傳 (保留的項, 被刪除的項)
+def max_features_allowed(n_samples, samples_per_term):
+    """依樣本數決定特徵（設計矩陣欄位，不含截距）數量上限
+
+    同時受兩個條件約束，取較嚴格者：
+      1. EPV 原則：每個參數至少要有 samples_per_term 筆樣本
+      2. 自由度預算：必須留下 MIN_RESID_DF 個殘差自由度
+    """
+    by_epv = n_samples // samples_per_term
+    by_resid_df = n_samples - MIN_RESID_DF - 1  # 扣掉截距
+    return max(1, min(by_epv, by_resid_df))
+
+
+def trim_terms_to_budget(terms, y_col, data, data_json, max_features):
+    """把模型項裁減到 max_features 個設計矩陣欄位以內，回傳 (保留的項, 被刪除的項)
 
     小樣本 DoE 全展開二階交互作用極易飽和（df_resid <= 0），此時 p-value 全為 NaN，
     後向消去法會因 NaN 比較恆為 False 而誤判成「篩選完成」，故必須在建模前先卡預算。
@@ -64,9 +78,9 @@ def trim_terms_to_budget(terms, y_col, data, data_json, min_resid_df=MIN_RESID_D
     """
     kept = list(terms)
     dropped = []
-    n_samples = len(data)
 
-    while kept and n_samples - count_design_cols(kept, data) < min_resid_df:
+    # 扣 1 是因為 count_design_cols 的回傳值含截距，而上限是針對特徵數
+    while kept and count_design_cols(kept, data) - 1 > max_features:
         candidates = [t for t in kept if ":" in t] or kept
         weakest = min(candidates, key=lambda t: term_strength(t, y_col, data_json))
         kept.remove(weakest)
@@ -186,8 +200,19 @@ if uploaded_file is not None:
         # ==========================================
         # 步驟 3：向後消去法 (Backward Elimination)
         # ==========================================
-        st.header("3. OLS 模型自動篩選,「非」強制階層原則 (P < 0.1)")
-        
+        st.header(f"3. OLS 模型自動篩選,「非」強制階層原則 (P < {P_VALUE_THRESHOLD})")
+
+        # EPV 比例開放調整：DoE 資料為正交設計、樣本刻意精簡，10:1 往往過嚴
+        samples_per_term = st.number_input(
+            "📏 每個特徵所需樣本數 (EPV)，數字越大模型越精簡:",
+            min_value=2, max_value=50, value=DEFAULT_SAMPLES_PER_TERM, step=1
+        )
+        max_features = max_features_allowed(len(df), samples_per_term)
+        st.caption(
+            f"樣本數 {len(df)} 筆 → 最多納入 **{max_features}** 個特徵"
+            f"（EPV 上限 {len(df) // samples_per_term}、自由度上限 {len(df) - MIN_RESID_DF - 1}，取較嚴格者）"
+        )
+
         main_effects  = [to_term(c, categ_x) for c in x_cols]
         interactions  = [f"{to_term(a, categ_x)}:{to_term(b, categ_x)}" for a, b in combinations(x_cols, 2)]
         current_terms = main_effects + interactions
@@ -195,30 +220,28 @@ if uploaded_file is not None:
         model = None
         df_json = df.to_json()  # 序列化一次，供迴圈內快取使用
 
-        # ---- 自由度預算閘門 ----
-        # 主效應本身就超編時無法建模，直接擋下；否則沿用者會拿到 R²=1 的飽和假模型
-        if len(df) - count_design_cols(main_effects, df) < MIN_RESID_DF:
+        # ---- 特徵數預算閘門 ----
+        # 樣本連一個主效應都撐不起時無法建模，直接擋下；否則使用者會拿到 R²=1 的飽和假模型
+        if len(df) - MIN_RESID_DF - 1 < 1:
             st.error(
-                f"⚠️ 樣本數不足：目前 **{len(df)}** 筆資料，光是 {len(x_cols)} 個主效應就需要 "
-                f"**{count_design_cols(main_effects, df) + MIN_RESID_DF}** 筆才能保留 {MIN_RESID_DF} 個殘差自由度。\n\n"
-                "請減少因子數量，或補充實驗數據後再試。"
+                f"⚠️ 樣本數不足：目前僅 **{len(df)}** 筆資料，至少需要 {MIN_RESID_DF + 2} 筆"
+                f"才能在保留 {MIN_RESID_DF} 個殘差自由度的前提下配適任何模型。"
             )
             st.stop()
 
-        current_terms, dropped_terms = trim_terms_to_budget(current_terms, y_col, df, df_json)
+        current_terms, dropped_terms = trim_terms_to_budget(current_terms, y_col, df, df_json, max_features)
         if dropped_terms:
             st.warning(
-                f"⚠️ 自由度不足，已於建模前移除 **{len(dropped_terms)}** 個解釋力最弱的交互作用："
+                f"⚠️ 超出特徵數上限，已於建模前移除 **{len(dropped_terms)}** 個解釋力最弱的項："
                 f"`{'`, `'.join(dropped_terms)}`\n\n"
-                f"（{len(df)} 筆樣本至多容納 {len(df) - MIN_RESID_DF} 個模型參數，"
-                f"以保留 {MIN_RESID_DF} 個殘差自由度供檢定使用）"
+                f"（{len(df)} 筆樣本至多容納 {max_features} 個特徵）"
             )
 
         with st.expander("🔄 展開查看模型自動優化過程", expanded=False):
             step = 1
             while True:
                 if not current_terms:
-                    st.warning("⚠️ 所有因子的 P-value 均大於 0.1，無法建立有效的預測模型。")
+                    st.warning(f"⚠️ 所有因子的 P-value 均大於 {P_VALUE_THRESHOLD}，無法建立有效的預測模型。")
                     break
 
                 formula = f"{y_col} ~ " + " + ".join(current_terms)
@@ -249,12 +272,22 @@ if uploaded_file is not None:
                 max_p_val  = max(term_max_p.values())
                 max_p_term = max(term_max_p, key=term_max_p.get)
 
-                if max_p_val > 0.1:
-                    st.write(f"🔹 步驟 {step}: 移除 `{max_p_term}` (P-value = {max_p_val:.4f} > 0.1)")
+                n_features = count_design_cols(current_terms, df) - 1  # 不含截距
+
+                if max_p_val > P_VALUE_THRESHOLD:
+                    st.write(f"🔹 步驟 {step}: 移除 `{max_p_term}` "
+                             f"(P-value = {max_p_val:.4f} > {P_VALUE_THRESHOLD})")
+                    current_terms.remove(max_p_term)
+                    step += 1
+                elif n_features > max_features:
+                    # p 值全數達標但特徵仍超編時，繼續移除 p 值最大者直到符合上限
+                    st.write(f"🔺 步驟 {step}: 特徵數 {n_features} > 上限 {max_features}，"
+                             f"移除 P-value 最大的 `{max_p_term}` (P-value = {max_p_val:.4f})")
                     current_terms.remove(max_p_term)
                     step += 1
                 else:
-                    st.success("✅ 篩選完成！保留的因子 P-value 均 <= 0.1。")
+                    st.success(f"✅ 篩選完成！保留 {n_features} 個特徵（上限 {max_features}），"
+                               f"P-value 均 <= {P_VALUE_THRESHOLD}。")
                     break
         
         if model is not None:
