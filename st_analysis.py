@@ -13,9 +13,15 @@ import matplotlib.pyplot as plt
 import scipy.optimize as opt
 from scipy import stats as sp_stats
 import re
+import numpy as np
+import seaborn as sns
 from itertools import combinations, product as iterproduct
 from patsy import dmatrix
 import io
+
+# 中文字型設定，避免熱力圖與診斷圖的中文標籤變成方框
+plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False
 
 MIN_RESID_DF = 3           # 殘差自由度下限：低於此值時 t 檢定與殘差圖失去判讀意義
 P_VALUE_THRESHOLD = 0.05   # 保留因子的顯著水準門檻
@@ -95,7 +101,6 @@ def center_point_curvature_test(y_factor, y_center):
     y_center : array-like, 中心點的 Y 數值
     回傳包含檢定結果的 dict
     """
-    import numpy as np
     n_F = len(y_factor)
     n_C = len(y_center)
     y_bar_F = np.mean(y_factor)
@@ -194,6 +199,56 @@ if uploaded_file is not None:
 
         if categ_x:
             st.info(f"📌 已偵測到類別因子：**{', '.join(categ_x)}**，將自動套用虛擬變數編碼 C()。")
+
+        st.divider()
+
+        # ==========================================
+        # 步驟 2.5：因子相關性熱力圖（建模前診斷）
+        # ==========================================
+        st.header("2.5. 🔥 因子相關性檢視")
+        st.markdown(
+            "建模前先檢查因子之間是否存在共線性。正交設計的 X 之間應接近 0，"
+            "若出現高相關（|r| > 0.8），表示設計不正交或資料有缺漏，係數將難以解讀。"
+        )
+        st.caption("⚠️ 此圖僅供診斷，**不會**用來篩選因子 —— DoE 的因子是刻意設計要驗證的，"
+                   "主效應與 Y 單變數相關性低但交互作用顯著是常見情況。")
+
+        # 僅取數值因子與 Y：類別因子無法直接計算相關係數
+        corr_cols = numeric_x + [y_col]
+
+        if len(corr_cols) < 2:
+            st.info("數值因子不足 2 個，略過相關性熱力圖。")
+        else:
+            with st.expander("📊 展開查看 Spearman 相關係數熱力圖", expanded=False):
+                # Spearman 秩相關對非線性關係與離群值較穩健
+                corr = df[corr_cols].corr(method='spearman')
+                mask = np.triu(np.ones_like(corr, dtype=bool), k=1)  # 遮罩上三角避免資訊重複
+
+                fig_corr, ax_corr = plt.subplots(figsize=(min(1.1 * len(corr_cols) + 2, 11),
+                                                          min(0.9 * len(corr_cols) + 2, 9)))
+                sns.heatmap(corr, mask=mask, annot=True, annot_kws={'size': 8},
+                            cmap='coolwarm', center=0, fmt='.2f', square=True,
+                            linewidths=0.5, vmin=-1, vmax=1,
+                            cbar_kws={'shrink': 0.8, 'label': 'Spearman 相關係數'}, ax=ax_corr)
+                ax_corr.set_title("因子相關係數熱力圖 (Spearman)", fontsize=13, pad=15)
+                plt.setp(ax_corr.get_xticklabels(), rotation=45, ha='right')
+                plt.setp(ax_corr.get_yticklabels(), rotation=0)
+                fig_corr.tight_layout()
+                st.pyplot(fig_corr)
+                plt.close(fig_corr)
+
+                # 主動點名高共線性的因子配對，使用者不必自己盯著方格找
+                HIGH_CORR_THRESHOLD = 0.8
+                high_pairs = [
+                    f"`{a}` ↔ `{b}` (r = {corr.loc[a, b]:.2f})"
+                    for a, b in combinations(numeric_x, 2)
+                    if abs(corr.loc[a, b]) > HIGH_CORR_THRESHOLD
+                ]
+                if high_pairs:
+                    st.warning("⚠️ 偵測到高度共線的因子配對：\n\n- " + "\n- ".join(high_pairs)
+                               + "\n\n建議擇一納入模型，或檢查實驗設計是否正交。")
+                else:
+                    st.success(f"✅ 因子間無高度共線性（|r| 均 <= {HIGH_CORR_THRESHOLD}）。")
 
         st.divider()
 
