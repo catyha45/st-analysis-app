@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 
 """
+Original DOE framework developed by Prof. Lin.George.
+
+Enhanced and deployed by Neo and Cheng Terry.
+
 林大神的實驗設計, DOE 的基本物件
 Version 0.1 2026/05/09 我一定是瘋了…哈哈哈…
 """
@@ -136,6 +140,8 @@ def center_point_curvature_test(y_factor, y_center):
 st.set_page_config(page_title="DoE 實驗數據分析與最佳化", layout="wide")
 st.title("📈 實驗設計 (DoE) 分析與最佳化預測模型")
 st.markdown("上傳數據、篩選顯著因子、驗證模型健康度，並自動尋找最佳生產參數。")
+st.caption("Original DOE framework developed by Prof. Lin.George · "
+           "Enhanced and deployed by Neo and Cheng Terry")
 
 # 初始化 session state 來記憶最佳化參數
 if 'opt_params' not in st.session_state:
