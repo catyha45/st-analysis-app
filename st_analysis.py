@@ -7,15 +7,15 @@ Enhanced and deployed by Neo and Cheng Terry.
 
 林大神的實驗設計, DOE 的基本物件
 Version 0.1 2026/05/09 我一定是瘋了…哈哈哈…
-Version 0.2 2026/08/06 介面改為側邊欄導覽；中文字型改為執行期偵測
+Version 0.2 2026/08/06 介面改為側邊欄導覽；matplotlib 圖表一律不畫中文
 """
+
 
 import streamlit as st
 import pandas as pd
 import statsmodels.formula.api as smf
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
-from matplotlib import font_manager
 import scipy.optimize as opt
 from scipy import stats as sp_stats
 import re
@@ -25,15 +25,11 @@ from itertools import combinations, product as iterproduct
 from patsy import dmatrix
 import io
 
-# 依偏好順序排列的中文字型候選:Windows 本機 → macOS → Linux/雲端 (Noto)
-# 直接寫死字型名稱會在沒有該字型的機器上退回 DejaVu Sans,把中文全畫成方框 □,
-# 故改為先掃描系統實際安裝的字型再挑,並在挑不到時於介面明講。
-CJK_FONT_CANDIDATES = [
-    "Microsoft JhengHei", "Microsoft YaHei", "SimHei",          # Windows
-    "PingFang TC", "Heiti TC", "Arial Unicode MS",              # macOS
-    "Noto Sans CJK TC", "Noto Sans CJK SC", "Noto Sans CJK JP", # Linux / Streamlit Cloud
-    "Noto Sans TC", "WenQuanYi Zen Hei", "Source Han Sans TW",
-]
+# 圖表一律不畫中文:字型是否存在依機器而異(雲端 Linux 沒有微軟正黑體),
+# 與其偵測字型再祈禱裝得到,不如讓 matplotlib 只吐 ASCII —— 中文說明留在 Streamlit 元件裡,
+# 由瀏覽器負責算繪,永遠不會變成方框 □。
+FACTOR_LABEL_PREFIX = "F"  # 熱力圖軸標籤代號,避免把中文欄名直接畫進圖裡
+RESPONSE_LABEL = "Y"
 
 MIN_RESID_DF = 3           # 殘差自由度下限：低於此值時 t 檢定與殘差圖失去判讀意義
 P_VALUE_THRESHOLD = 0.05   # 保留因子的顯著水準門檻
@@ -43,20 +39,25 @@ RANGE_EXTEND_RATIO = 0.3   # 最佳化與模擬器的因子範圍外推比例
 MAX_COLS_PER_ROW = 5       # 模擬器每列最多顯示的因子數，防止 UI 擠壓
 
 
-@st.cache_data
-def find_cjk_font():
-    """回傳系統中第一個可用的中文字型名稱，全都沒有則回傳 None
-
-    掃描 matplotlib 字型快取而非直接指定，才能同時支援本機 Windows 與雲端 Linux。
-    """
-    installed = {font.name for font in font_manager.fontManager.ttflist}
-    return next((name for name in CJK_FONT_CANDIDATES if name in installed), None)
-
-
-CJK_FONT = find_cjk_font()
-if CJK_FONT:
-    plt.rcParams['font.sans-serif'] = [CJK_FONT]
+# unicode_minus 用的字元在 DejaVu Sans 也缺，關掉才不會讓負號變成方框
 plt.rcParams['axes.unicode_minus'] = False
+
+
+def make_plot_labels(numeric_x, y_col):
+    """把因子欄名對應成 ASCII 代號，回傳 (欄名 → 代號 dict, 對照表 DataFrame)
+
+    欄名可能含中文，直接當軸標籤會被 matplotlib 畫成方框，故以 F1/F2… 代號取代，
+    真正的欄名改用 Streamlit 表格呈現。
+    """
+    label_map = {col: f"{FACTOR_LABEL_PREFIX}{i}" for i, col in enumerate(numeric_x, start=1)}
+    label_map[y_col] = RESPONSE_LABEL
+
+    legend_df = pd.DataFrame({
+        "代號": list(label_map.values()),
+        "欄位名稱": list(label_map.keys()),
+        "角色": ["因子 (X)"] * len(numeric_x) + ["反應變數 (Y)"],
+    })
+    return label_map, legend_df
 
 
 @st.cache_data
@@ -293,18 +294,29 @@ def render_correlation(df, y_col, numeric_x):
     corr = df[corr_cols].corr(method='spearman')
     mask = np.triu(np.ones_like(corr, dtype=bool), k=1)  # 遮罩上三角避免資訊重複
 
-    fig_corr, ax_corr = plt.subplots(figsize=(min(1.1 * len(corr_cols) + 2, 11),
-                                              min(0.9 * len(corr_cols) + 2, 9)))
-    sns.heatmap(corr, mask=mask, annot=True, annot_kws={'size': 8},
-                cmap='coolwarm', center=0, fmt='.2f', square=True,
-                linewidths=0.5, vmin=-1, vmax=1,
-                cbar_kws={'shrink': 0.8, 'label': 'Spearman 相關係數'}, ax=ax_corr)
-    ax_corr.set_title("因子相關係數熱力圖 (Spearman)", fontsize=13, pad=15)
-    plt.setp(ax_corr.get_xticklabels(), rotation=45, ha='right')
-    plt.setp(ax_corr.get_yticklabels(), rotation=0)
-    fig_corr.tight_layout()
-    st.pyplot(fig_corr)
-    plt.close(fig_corr)
+    # 軸標籤改用 ASCII 代號，圖裡不出現任何中文
+    label_map, legend_df = make_plot_labels(numeric_x, y_col)
+    corr_plot = corr.rename(index=label_map, columns=label_map)
+
+    col_plot, col_legend = st.columns([3, 1])
+
+    with col_plot:
+        fig_corr, ax_corr = plt.subplots(figsize=(min(1.1 * len(corr_cols) + 2, 11),
+                                                  min(0.9 * len(corr_cols) + 2, 9)))
+        sns.heatmap(corr_plot, mask=mask, annot=True, annot_kws={'size': 8},
+                    cmap='coolwarm', center=0, fmt='.2f', square=True,
+                    linewidths=0.5, vmin=-1, vmax=1,
+                    cbar_kws={'shrink': 0.8, 'label': 'Spearman rho'}, ax=ax_corr)
+        ax_corr.set_title("Spearman Correlation Matrix", fontsize=13, pad=15)
+        plt.setp(ax_corr.get_xticklabels(), rotation=0)
+        plt.setp(ax_corr.get_yticklabels(), rotation=0)
+        fig_corr.tight_layout()
+        st.pyplot(fig_corr)
+        plt.close(fig_corr)
+
+    with col_legend:
+        st.caption("代號對照")
+        st.dataframe(legend_df, use_container_width=True, hide_index=True)
 
     # 主動點名高共線性的因子配對，使用者不必自己盯著方格找
     high_pairs = [
@@ -444,8 +456,8 @@ def render_residuals(model):
         fig1, ax1 = plt.subplots(figsize=(6, 4))
         ax1.scatter(model.fittedvalues, model.resid, alpha=0.7, edgecolors='k')
         ax1.axhline(0, color='red', linestyle='--')
-        ax1.set_xlabel("Fitted Values (預測值)")
-        ax1.set_ylabel("Residuals (殘差)")
+        ax1.set_xlabel("Fitted Values")
+        ax1.set_ylabel("Residuals")
         ax1.set_title("Residuals vs. Fitted")
         ax1.grid(True, linestyle=':', alpha=0.6)
         st.pyplot(fig1)
@@ -642,11 +654,6 @@ with st.sidebar:
     st.title("📈 DoE 分析")
     st.caption("Original DOE framework by Prof. Lin.George · "
                "Enhanced by Neo and Cheng Terry")
-
-    if not CJK_FONT:
-        st.error("⚠️ 系統找不到任何中文字型，圖表中文會顯示為方框 □。\n\n"
-                 "部署到 Streamlit Cloud 請在專案根目錄放 `packages.txt` 並寫入 `fonts-noto-cjk`；"
-                 "本機請安裝微軟正黑體或 Noto Sans CJK。")
 
     st.divider()
     st.subheader("① 資料來源")
