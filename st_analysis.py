@@ -336,8 +336,9 @@ def render_model(df, y_col, model, dropped_terms, elimination_log, max_features,
     st.caption(f"向後消去法（Backward Elimination），「非」強制階層原則，門檻 P < {P_VALUE_THRESHOLD}")
 
     st.caption(
-        f"樣本數 {len(df)} 筆、EPV {samples_per_term} → 最多納入 **{max_features}** 個特徵"
-        f"（EPV 上限 {len(df) // samples_per_term}、自由度上限 {len(df) - MIN_RESID_DF - 1}，取較嚴格者）"
+        f"共 {len(df)} 筆數據，設定為每個因子至少 {samples_per_term} 筆支撐 "
+        f"→ 模型最多納入 **{max_features}** 個項目"
+        f"（數據量上限 {len(df) // samples_per_term}、自由度上限 {len(df) - MIN_RESID_DF - 1}，取較嚴格者）"
     )
 
     if dropped_terms:
@@ -709,11 +710,18 @@ with st.sidebar:
     st.session_state.prev_x_cols = x_cols
 
     # EPV 比例開放調整：DoE 資料為正交設計、樣本刻意精簡，10:1 往往過嚴
+    # 標籤刻意避開「EPV / 特徵」等術語，改用白話問句，初學者才知道自己在調什麼
     samples_per_term = st.number_input(
-        "📏 每個特徵所需樣本數 (EPV)",
+        "📏 每個因子至少要有幾筆數據支撐？",
         min_value=2, max_value=50, value=DEFAULT_SAMPLES_PER_TERM, step=1,
-        help="數字越大模型越精簡。DoE 正交設計可適度調低。"
+        help="統計上稱為 EPV (Events Per Variable)。\n\n"
+             "數字**調高** → 模型只留最關鍵的少數因子，結論較可靠但可能漏掉真效應。\n\n"
+             "數字**調低** → 模型納入較多因子，但小樣本下容易配適到雜訊（過度配適）。\n\n"
+             "一般統計建議 10；DoE 是正交設計、樣本刻意精簡，調到 3～5 通常合理。"
     )
+    # 把設定值直接翻成「會發生什麼事」，使用者不必自己換算
+    st.caption(f"➜ 目前設定：模型最多納入 **{max_features_allowed(len(df), samples_per_term)}** 個項目"
+               f"（{len(df)} 筆數據 ÷ {samples_per_term}）")
 
 if not x_cols:
     st.title("📈 實驗設計 (DoE) 分析與最佳化預測模型")
