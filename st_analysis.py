@@ -10,13 +10,10 @@ Version 0.1 2026/05/09 我一定是瘋了…哈哈哈…
 Version 0.2 2026/08/06
     1. 介面重構：輸入集中到側邊欄，主畫面以步驟導覽一次只顯示一個步驟，不再無限捲動
     2. 未上傳檔案時顯示資料格式要求與流程說明，取代原本的空白頁
-    3. matplotlib 圖表一律不畫中文（軸標籤改用 F1/F2 代號 + 對照表），
-       徹底避開雲端 Linux 無中文字型導致的方框 □
-    4. 最佳化求解新增逐因子限制條件：數值因子可自訂上下限或鎖定，
-       類別因子可排除不可用的選項，並在成果表標示觸界因子
-    5. EPV 設定改用白話標籤與即時回饋，降低初學者的理解門檻
-    6. 向後消去法改為回傳過程紀錄（backward_eliminate），與 UI 渲染解耦
-    7.
+    3. matplotlib 圖表一律不畫中文修改 Linux 無中文字型導致的方框 □
+    4. 最佳化求解新增逐因子限制條件：邊界條件，類別因子可排除不可用的選項
+    5. EPV 設定改用白話標籤與即時回饋，降低初學者的理解門檻(自由度改善)
+
 """
 
 
@@ -786,15 +783,12 @@ if "has_optimized_results" not in st.session_state:
 with st.sidebar:
     st.title("📈 DoE 分析")
 
-    # 掛名資訊獨立成資訊卡：原本擠成一行灰字，既不好讀也對不起原作者
-    st.info(
-        "**Original DOE Framework**  \n"
-        "Prof. Lin.George\n\n"
-        "**Enhanced & Deployed by**  \n"
-        "Neo · Cheng Terry",
-        icon="👥",
+    # 掛名資訊分行但維持 caption 灰字級別：要讀得清楚，但不該跟操作介面搶注意力
+    st.caption(
+        f"Original framework — Prof. Lin.George  \n"
+        f"Enhanced by Neo · Cheng Terry  \n"
+        f"v{APP_VERSION}"
     )
-    st.caption(f"Version {APP_VERSION}")
 
     st.divider()
     st.subheader("① 資料來源")
