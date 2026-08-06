@@ -7,7 +7,16 @@ Enhanced and deployed by Neo and Cheng Terry.
 
 林大神的實驗設計, DOE 的基本物件
 Version 0.1 2026/05/09 我一定是瘋了…哈哈哈…
-Version 0.2 2026/08/06 介面改為側邊欄導覽；matplotlib 圖表一律不畫中文
+Version 0.2 2026/08/06
+    1. 介面重構：輸入集中到側邊欄，主畫面以步驟導覽一次只顯示一個步驟，不再無限捲動
+    2. 未上傳檔案時顯示資料格式要求與流程說明，取代原本的空白頁
+    3. matplotlib 圖表一律不畫中文（軸標籤改用 F1/F2 代號 + 對照表），
+       徹底避開雲端 Linux 無中文字型導致的方框 □
+    4. 最佳化求解新增逐因子限制條件：數值因子可自訂上下限或鎖定，
+       類別因子可排除不可用的選項，並在成果表標示觸界因子
+    5. EPV 設定改用白話標籤與即時回饋，降低初學者的理解門檻
+    6. 向後消去法改為回傳過程紀錄（backward_eliminate），與 UI 渲染解耦
+    7.
 """
 
 
@@ -28,6 +37,8 @@ import io
 # 圖表一律不畫中文:字型是否存在依機器而異(雲端 Linux 沒有微軟正黑體),
 # 與其偵測字型再祈禱裝得到,不如讓 matplotlib 只吐 ASCII —— 中文說明留在 Streamlit 元件裡,
 # 由瀏覽器負責算繪,永遠不會變成方框 □。
+APP_VERSION = "0.2 (2026/08/06)"  # 與檔頭 docstring 的版本紀錄同步
+
 FACTOR_LABEL_PREFIX = "F"  # 熱力圖軸標籤代號,避免把中文欄名直接畫進圖裡
 RESPONSE_LABEL = "Y"
 
@@ -473,10 +484,119 @@ def render_residuals(model):
         plt.close(fig2)
 
 
+def default_constraint_table(df, numeric_x):
+    """建立數值因子的預設限制條件表（實驗範圍外推 RANGE_EXTEND_RATIO）"""
+    rows = []
+    for col in numeric_x:
+        lower, upper = factor_bounds(df[col])
+        rows.append({
+            "因子": col,
+            "下限": round(lower, 4),
+            "上限": round(upper, 4),
+            "實驗實際範圍": f"{df[col].min():g} ~ {df[col].max():g}",
+        })
+    return pd.DataFrame(rows)
+
+
+def is_at_bound(value, bound, rel_tol=1e-3):
+    """判斷最佳解是否貼在搜尋範圍的邊界上
+
+    差異以範圍寬度normalize，因子單位不同（秒 vs. 公尺）時才有一致的判定標準。
+    """
+    if value is None:
+        return False
+    lower, upper = bound
+    span = upper - lower
+    if span == 0:
+        return False
+    return min(abs(value - lower), abs(value - upper)) / span < rel_tol
+
+
+def constraint_status(col, value, bounds_map, fixed_map):
+    """回傳因子在成果表中的限制狀態文字"""
+    if col in fixed_map:
+        return "🔒 已鎖定"
+    if col not in bounds_map:
+        return "—"  # 類別因子不適用數值邊界
+    lower, upper = bounds_map[col]
+    if is_at_bound(value, (lower, upper)):
+        return "⚠️ 觸及下限" if abs(value - lower) < abs(value - upper) else "⚠️ 觸及上限"
+    return "✅ 範圍內"
+
+
+def render_constraint_editor(df, numeric_x, categ_x):
+    """讓使用者逐一設定每個因子的可行範圍，回傳 (數值範圍 dict, 固定值 dict, 類別可選 level dict)
+
+    製程上常有硬限制（機台上限、材料規格、某供應商停產），
+    若不讓使用者設限，演算法會給出無法執行的「最佳解」而失去意義。
+    數值因子的下限 == 上限 視為鎖定，該因子不進入搜尋空間直接當常數代入。
+    """
+    with st.expander("🔒 設定各因子的限制條件（可行範圍）", expanded=True):
+        st.caption(
+            f"預設為實驗範圍向外延伸 {int(RANGE_EXTEND_RATIO * 100)}%。"
+            "請依製程實際能力調整 —— **把下限與上限設成相同數值即代表鎖定該因子**。"
+        )
+
+        bounds_map, fixed_map, allowed_levels = {}, {}, {}
+
+        if numeric_x:
+            st.markdown("**數值因子**")
+            edited = st.data_editor(
+                default_constraint_table(df, numeric_x),
+                key="constraint_table",
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "因子": st.column_config.TextColumn(disabled=True),
+                    "下限": st.column_config.NumberColumn(format="%.4f"),
+                    "上限": st.column_config.NumberColumn(format="%.4f"),
+                    "實驗實際範圍": st.column_config.TextColumn(disabled=True,
+                                                                help="原始數據的最小值 ~ 最大值"),
+                },
+            )
+
+            for _, row in edited.iterrows():
+                col, lower, upper = row["因子"], row["下限"], row["上限"]
+                if pd.isna(lower) or pd.isna(upper):
+                    st.error(f"⚠️ 因子 `{col}` 的上下限不可留空。")
+                    return None
+                if lower > upper:
+                    st.error(f"⚠️ 因子 `{col}` 的下限 ({lower:g}) 大於上限 ({upper:g})，請修正。")
+                    return None
+                if lower == upper:
+                    fixed_map[col] = float(lower)
+                else:
+                    bounds_map[col] = (float(lower), float(upper))
+
+        if categ_x:
+            st.markdown("**類別因子**（取消勾選代表該選項不可用）")
+            cat_cols = st.columns(min(len(categ_x), 3))
+            for i, col in enumerate(categ_x):
+                with cat_cols[i % len(cat_cols)]:
+                    levels = sorted(df[col].unique().tolist(), key=str)
+                    chosen = st.multiselect(col, options=levels, default=levels,
+                                            key=f"allowed_{col}")
+                    if not chosen:
+                        st.error(f"⚠️ 因子 `{col}` 至少要保留一個可用選項。")
+                        return None
+                    allowed_levels[col] = chosen
+
+        # 摘要一行講清楚搜尋空間有多大，使用者才知道自己把範圍縮到什麼程度
+        n_combos = int(np.prod([len(v) for v in allowed_levels.values()])) if allowed_levels else 1
+        st.caption(f"➜ 搜尋空間：{len(bounds_map)} 個可調數值因子、"
+                   f"{len(fixed_map)} 個已鎖定、{n_combos} 種類別組合")
+
+    return bounds_map, fixed_map, allowed_levels
+
+
 def render_optimizer(df, y_col, x_cols, numeric_x, categ_x, model):
     st.header("6️⃣ 自動尋找最佳參數")
-    st.caption(f"搜尋範圍為實驗因子範圍向外延伸 {int(RANGE_EXTEND_RATIO * 100)}%")
-    st.markdown("設定您的目標，系統將利用演算法自動反推出最佳的實驗條件設定值。")
+    st.markdown("設定目標與各因子的可行範圍，系統將自動反推出最佳的實驗條件設定值。")
+
+    constraints = render_constraint_editor(df, numeric_x, categ_x)
+    if constraints is None:
+        return  # 限制條件不合法，先讓使用者修正
+    bounds_map, fixed_map, allowed_levels = constraints
 
     col_opt1, col_opt2 = st.columns([1, 2])
     with col_opt1:
@@ -492,11 +612,12 @@ def render_optimizer(df, y_col, x_cols, numeric_x, categ_x, model):
         start_opt = st.button("🚀 開始最佳化運算", type="primary", use_container_width=True)
 
     if start_opt:
-        # 數值因子：設定搜尋範圍（外推）
-        num_bounds = [factor_bounds(df[col]) for col in numeric_x]
+        # 只有未鎖定的數值因子進入搜尋空間，鎖定者以常數代入
+        free_x = list(bounds_map.keys())
+        num_bounds = [bounds_map[col] for col in free_x]
 
-        # 類別因子：枚舉所有可能組合
-        cat_levels = [df[col].unique().tolist() for col in categ_x]
+        # 類別因子：僅枚舉使用者允許的 level 組合
+        cat_levels = [allowed_levels[col] for col in categ_x]
         cat_combos = list(iterproduct(*cat_levels)) if categ_x else [()]
 
         best_res_fun   = float('inf')
@@ -509,18 +630,18 @@ def render_optimizer(df, y_col, x_cols, numeric_x, categ_x, model):
                 fixed_cats = dict(zip(categ_x, cat_combo))
 
                 def objective(x_array, fixed_cats=fixed_cats):
-                    row = {**fixed_cats, **dict(zip(numeric_x, x_array))}
+                    row = {**fixed_cats, **fixed_map, **dict(zip(free_x, x_array))}
                     pred_y = model.predict(pd.DataFrame([row]))[0]
                     if opt_goal == "最大化 (Maximize)": return -pred_y
                     elif opt_goal == "最小化 (Minimize)": return pred_y
                     else: return (pred_y - target_val) ** 2
 
-                if numeric_x:
+                if free_x:
                     res = opt.differential_evolution(objective, num_bounds, seed=42,
                                                      tol=1e-8, maxiter=1000)
                     fun_val, opt_x_vals, converged = res.fun, res.x, res.success
                 else:
-                    # 無數值因子：直接計算
+                    # 數值因子全被鎖定（或本來就沒有）：直接計算
                     fun_val, opt_x_vals, converged = objective([]), [], True
 
                 if fun_val < best_res_fun:
@@ -530,12 +651,12 @@ def render_optimizer(df, y_col, x_cols, numeric_x, categ_x, model):
                     best_converged = converged
 
         if not best_converged:
-            st.error("⚠️ 演算法無法收斂，請檢查資料或放寬條件。")
+            st.error("⚠️ 演算法無法收斂，請檢查資料或放寬限制條件。")
             return
 
-        # 合併數值與類別最佳解
-        opt_params_combined = {**best_opt_cats,
-                               **dict(zip(numeric_x, best_opt_x if best_opt_x is not None else []))}
+        # 合併數值（含鎖定值）與類別最佳解
+        opt_params_combined = {**best_opt_cats, **fixed_map,
+                               **dict(zip(free_x, best_opt_x if best_opt_x is not None else []))}
 
         # 防止 rerun 之後消失
         st.session_state.opt_params = opt_params_combined
@@ -580,9 +701,20 @@ def render_optimizer(df, y_col, x_cols, numeric_x, categ_x, model):
         opt_df = pd.DataFrame({
             "因子": x_cols,
             "型別": ["類別" if c in categ_x else "數值" for c in x_cols],
-            "最佳設定值": display_vals
+            "最佳設定值": display_vals,
+            "限制狀態": [constraint_status(c, current_opt_params.get(c),
+                                           bounds_map, fixed_map) for c in x_cols],
         }).set_index("因子")
         st.dataframe(opt_df, use_container_width=True)
+
+    # 解落在邊界代表真正的最佳點可能在限制之外，這是使用者最該知道的一件事
+    at_bound = [c for c in bounds_map if is_at_bound(current_opt_params.get(c), bounds_map[c])]
+    if at_bound:
+        st.warning(
+            f"⚠️ 以下因子的最佳解剛好落在您設定的邊界上：`{'`, `'.join(at_bound)}`\n\n"
+            "代表模型認為往邊界外走還會更好。若製程允許，可放寬該因子的限制再算一次；"
+            "若不允許，則目前這組就是限制條件下的最佳解。"
+        )
 
 
 def render_simulator(df, y_col, x_cols, categ_x, model):
@@ -653,8 +785,16 @@ if "has_optimized_results" not in st.session_state:
 # ==========================================
 with st.sidebar:
     st.title("📈 DoE 分析")
-    st.caption("Original DOE framework by Prof. Lin.George · "
-               "Enhanced by Neo and Cheng Terry")
+
+    # 掛名資訊獨立成資訊卡：原本擠成一行灰字，既不好讀也對不起原作者
+    st.info(
+        "**Original DOE Framework**  \n"
+        "Prof. Lin.George\n\n"
+        "**Enhanced & Deployed by**  \n"
+        "Neo · Cheng Terry",
+        icon="👥",
+    )
+    st.caption(f"Version {APP_VERSION}")
 
     st.divider()
     st.subheader("① 資料來源")
